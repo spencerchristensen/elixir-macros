@@ -1,0 +1,263 @@
+# The Language of Macros
+
+## The Abstract Syntax Tree
+
+Most languages have an AST, though you typically do not intereact with it.
+
+Jose Valim designed Elixir so that the AST is exposed in a form that can be represented by *Elixir's own data structures*.
+
+Metaprogramming in Elixir revolves around manipulating and inspecting ASTs.
+
+```elixir
+quote do: 1 + 2
+```
+
+```elixir
+quote do: div(10, 2)
+```
+
+## Macros
+
+Macros are code that writes code. They interact with the AST using Elixir's high-level syntax.
+
+Many of Elixir's top-level constructs are in fact macros, including `defmodule`, `def`, and `if`.
+
+Macros receive ASTs as arguments and provide ASTs as return values.
+
+```elixir
+defmodule Math do
+  defmacro say({:+, _, [lhs, rhs]}) do
+    quote do
+      lhs = unquote(lhs)
+      rhs = unquote(rhs)
+      result = lhs + rhs
+      IO.puts("#{lhs} plus #{rhs} is #{result}")
+    end
+  end
+
+  defmacro say({:*, _, [lhs, rhs]}) do
+    quote do
+      lhs = unquote(lhs)
+      rhs = unquote(rhs)
+      result = lhs * rhs
+      IO.puts("#{lhs} times #{rhs} is #{result}")
+    end
+  end
+end
+```
+
+```elixir
+require Math
+Math.say 5 + 2
+Math.say 18 * 4
+```
+
+All Elixir code is represented as a series of three-element tuples:
+
+1. An atom denoting the function call or another tuple representing a nested node in the AST.
+2. Metadata about the expression.
+3. A list of arguments for the function call.
+
+A language like Lisp has source code written directly in an AST. If you compare Lisp to Elixir's AST, you will see its similarities.
+
+## AST Literals
+
+Several literals in Elixir have the same representation in both the AST and high-level source.n
+
+```elixir
+IO.puts quote do: :atom
+IO.puts quote do: 123
+IO.puts quote do: 3.14
+IO.inspect quote do: [1,2,3]
+IO.puts quote do: "string"
+IO.inspect quote do: {:ok, 1}
+IO.inspect quote do: {:ok, [1,2,3]}
+```
+
+## Macros: The Building Blocks of Elixir
+
+We can create our own version of the `unless` macro:
+
+```elixir
+defmodule ControlFlow do
+  defmacro unless(expression, do: block) do
+    quote do
+      if !unquote(expression), do: unquote(block)
+    end
+  end
+end
+```
+
+```elixir
+require ControlFlow
+
+ControlFlow.unless 2 == 5, do: "block entered"
+```
+
+As macros receive the AST representation of arguments, we can accept any valid Elixir expression as the first argument. For the second argument, we can pattern match directly on the `do/end` block and bind its AST value to a variable.
+
+We start the macro with `quote` as, you will remember, the entire point of macros is to *return an AST*.
+
+🚨 **IMPORTANT START** 🚨
+
+The transformation in the `unless` macro is referred to as **macro expansion**. The final AST returned from `unless` is expanded within the caller's context at compile time. The produced code will not contain `unless` but will contain the `if !` expressions anywhere `unless` was used.
+
+🚨 **IMPORTANT END** 🚨
+
+The `unquote` macro allows values to be injected into an AST that is being defined. You can think of `quote/unquote` as string interpolation for code.
+
+We use `quote` to begin generating an AST.
+
+We use `unquote` to inject values from an outside context.
+
+```elixir
+number = 5
+
+ast = quote do
+  number * 10
+end
+
+IO.inspect ast
+
+Code.eval_quoted ast
+```
+
+```elixir
+number = 5
+
+ast = quote do
+  unquote(number) * 10
+end
+
+IO.inspect ast
+
+Code.eval_quoted ast
+```
+
+When the compiler encounters a macro, it recursively expands it until the code no longer contains any macro calls. It will also cease when it encounters macros contained in `Kernel.SpecialForms`, as these macros are the fundamental building blocks of Elixir and cannot be overridden.
+
+```elixir
+require ControlFlow
+
+ast = quote do
+  ControlFlow.unless 2 == 5, do: "block entered"
+end
+
+IO.inspect ast
+
+IO.puts "---------------------"
+
+expanded_once = Macro.expand_once(ast, __ENV__)
+
+IO.inspect expanded_once
+
+IO.puts "---------------------"
+
+expanded_fully = Macro.expand_once(expanded_once, __ENV__)
+
+IO.inspect expanded_fully
+
+true
+```
+
+## Code Injection and the Caller's Context
+
+Macros do not just generate code for the caller, they *inject it*. We call the place where code is injected a context.
+
+A **context** is the scope of the caller's bindings, imports, and aliases.
+
+A macro will execute in *two* places:
+
+* the context of the macro definition
+* the context of the caller's invocation of the macro
+
+If you find yourself losing track of what context your code is executing in, it may be a sign that your code generation is too complex.
+
+```elixir
+defmodule Mod do
+  defmacro definfo do
+    IO.puts("In macro's context (#{__MODULE__})")
+
+    quote do
+      IO.puts("In caller's context (#{__MODULE__})")
+
+      def friendly_info do
+        IO.puts("""
+        My name is #{__MODULE__}
+        My functions are #{inspect(__MODULE__.__info__(:functions))}
+        """)
+      end
+    end
+  end
+end
+```
+
+```elixir
+defmodule MyModule do
+  require Mod
+  Mod.definfo()
+end
+
+MyModule.friendly_info()
+```
+
+Elixir has a concept of macro hygiene.
+
+**Hygiene** means that variables, imports, and aliases that you define in a macro do not leak into the caller's own definitions.j
+
+```elixir
+ast = quote do
+  if meaning_to_life == 42 do
+    "its true"
+  else 
+    "it remains to be seen"
+  end
+end
+
+Code.eval_quoted ast, meaning_to_life: 42
+```
+
+`var!` can be used to override hygiene and reach directly into the caller's context.
+
+```elixir
+ast = quote do
+  if var!(meaning_to_life) == 42 do
+    "its true"
+  else 
+    "it remains to be seen"
+  end
+end
+
+Code.eval_quoted ast, meaning_to_life: 42
+```
+
+```elixir
+defmodule SetterHygiene do
+  defmacro bind_name(string) do
+    quote do
+      name = unquote(string)
+    end
+  end
+end
+```
+
+```elixir
+defmodule SetterNoHygiene do
+  defmacro bind_name(string) do
+    quote do
+      var!(name) = unquote(string)
+    end
+  end
+end
+```
+
+```elixir
+require SetterHygiene
+require SetterNoHygiene
+
+name = "Chris"
+SetterHygiene.bind_name("Max")
+IO.puts name
+SetterNoHygiene.bind_name("Max")
+IO.puts name                                                 
+```
